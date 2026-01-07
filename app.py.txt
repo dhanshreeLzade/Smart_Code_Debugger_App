@@ -1,0 +1,209 @@
+import streamlit as st
+import traceback
+import re
+
+# Optional OpenAI import
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ModuleNotFoundError:
+    OPENAI_AVAILABLE = False
+
+# Set your OpenAI API Key here if using Quick Fix
+# openai.api_key = "YOUR_OPENAI_API_KEY"
+
+st.set_page_config(page_title="Smart Error Debugger", layout="wide")
+st.title("🧠 Smart Error Debugging Assistant")
+
+# -------------------- TABS --------------------
+tabs = st.tabs(["Smart Debugger", "ChatGPT Quick Fix"])
+
+# -------------------- SMART DEBUGGER TAB --------------------
+with tabs[0]:
+    st.write("Paste your Python code below. I will analyze and give exact fix suggestions.")
+    code = st.text_area(
+        "📌 Paste Python code here",
+        height=300,
+        placeholder="Example:\na = 10\nb = 0\nprint(a / b)"
+    )
+
+    use_ai = False
+    if OPENAI_AVAILABLE:
+        use_ai = st.checkbox("💡 Show AI Quick Fix in Smart Debugger")
+
+    def analyze_code(user_code):
+        try:
+            exec(user_code, {})
+            return {"status": "success"}
+        except Exception as e:
+            tb = traceback.format_exc()
+            error_type = type(e).__name__
+
+            lines = user_code.strip("\n").split("\n")
+
+            line_no = None
+            line_match = re.search(r"line (\d+)", tb)
+            if line_match:
+                try:
+                    ln = int(line_match.group(1))
+                    if 0 < ln <= len(lines):
+                        line_no = ln
+                except:
+                    line_no = None
+
+            # Detect unclosed quotes for SyntaxError
+            if error_type == "SyntaxError":
+                for idx, l in enumerate(lines):
+                    if l.count('"') % 2 != 0 or l.count("'") % 2 != 0:
+                        line_no = idx + 1
+                        break
+
+            # Highlight code
+            highlighted = ""
+            for i, l in enumerate(lines, start=1):
+                if line_no and i == line_no:
+                    highlighted += f"❌ Line {i}: {l}\n"
+                else:
+                    highlighted += f"   Line {i}: {l}\n"
+
+            # Safe line_code
+            line_code = lines[line_no - 1] if line_no and 0 < line_no <= len(lines) else lines[-1]
+
+            fix_code = ""
+            explanation = ""
+
+            if error_type == "SyntaxError":
+                explanation = "Syntax mistake detected. Check colons, brackets, or indentation."
+                error_msg = str(e)
+                if '"' in line_code and line_code.count('"') % 2 != 0:
+                    fix_code = line_code + '"'
+                elif "'" in line_code and line_code.count("'") % 2 != 0:
+                    fix_code = line_code + "'"
+                elif "expected ':'" in error_msg:
+                    fix_code = line_code + ':'
+                else:
+                    fix_code = line_code
+
+            elif error_type == "NameError":
+                var_name = str(e).split("'")[1]
+                explanation = "You used a variable that was never defined."
+                fix_code = f"{var_name} = 0  # define variable before use"
+
+            elif error_type == "TypeError":
+                explanation = "You used incompatible data types together."
+                if '+' in line_code:
+                    parts = line_code.split('+')
+                    left = parts[0].strip()
+                    right = '+'.join(parts[1:]).strip()
+                    if not left.startswith("str("):
+                        fix_code = f"{left} = str({left})\n{left} + {right}"
+                    else:
+                        fix_code = line_code
+                else:
+                    fix_code = "# Convert variables to correct types"
+
+            elif error_type == "ZeroDivisionError":
+                explanation = "You tried to divide by zero."
+                fix_code = f"if b != 0:\n    {line_code.strip()}"
+            else:
+                explanation = "Check the code near the error line."
+                fix_code = line_code
+
+            return {
+                "status": "error",
+                "error_type": error_type,
+                "line": line_no,
+                "highlighted_code": highlighted,
+                "explanation": explanation,
+                "fix_code": fix_code,
+                "traceback": tb
+            }
+
+    if st.button("🔍 Analyze Code"):
+        if code.strip() == "":
+            st.warning("⚠️ Please paste Python code first.")
+        else:
+            result = analyze_code(code)
+            if result["status"] == "success":
+                st.success("✅ No errors found. Code ran successfully.")
+            else:
+                output = f"""
+status:
+{result['status']}
+
+error_type:
+{result['error_type']}
+
+error_line:
+{result['line']}
+
+highlighted_code:
+{result['highlighted_code']}
+
+explanation:
+{result['explanation']}
+
+fix_code:
+{result['fix_code']}
+"""
+                st.code(output, language="text")
+
+                if use_ai:
+                    st.info("💡 AI Quick Fix (from ChatGPT):")
+                    if not OPENAI_AVAILABLE:
+                        st.error("OpenAI module not installed. Install it with `pip install openai`.")
+                    else:
+                        try:
+                            prompt = f"""
+This Python code has errors. Only provide the corrected lines of code, do not explain:
+
+{code}
+"""
+                            response = openai.chat.completions.create(
+                                model="gpt-4",
+                                messages=[{"role":"user","content":prompt}],
+                                temperature=0
+                            )
+                            ai_fix = response.choices[0].message.content
+                            st.code(ai_fix, language="python")
+                        except Exception as e:
+                            st.error(f"AI Fix failed: {e}")
+
+# -------------------- CHATGPT QUICK FIX TAB --------------------
+with tabs[1]:
+    st.write("📌 Paste your Python code and select the error line. ChatGPT will give only the quick fix.")
+    chat_code = st.text_area(
+        "Paste code here",
+        height=250,
+        placeholder="Example:\na = 10\nb = 0\nprint(a / b)"
+    )
+
+    error_line = st.number_input(
+        "Enter the line number with error",
+        min_value=1,
+        step=1
+    )
+
+    if st.button("⚡ Get Quick Fix (ChatGPT)", key="chat_fix"):
+        if not OPENAI_AVAILABLE:
+            st.error("OpenAI module not installed. Install it with `pip install openai`.")
+        elif chat_code.strip() == "":
+            st.warning("⚠️ Paste Python code first.")
+        else:
+            code_lines = chat_code.strip().split("\n")
+            line_text = code_lines[error_line - 1] if 0 < error_line <= len(code_lines) else ""
+            prompt = f"""
+This Python code has an error in line {error_line}. Only provide the corrected line(s) of code, do not explain:
+
+{line_text}
+"""
+            try:
+                response = openai.chat.completions.create(
+                    model="gpt-4",
+                    messages=[{"role":"user","content":prompt}],
+                    temperature=0
+                )
+                quick_fix = response.choices[0].message.content
+                st.code(quick_fix, language="python")
+            except Exception as e:
+                st.error(f"AI Fix failed: {e}")
